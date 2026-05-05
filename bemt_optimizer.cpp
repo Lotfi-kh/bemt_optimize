@@ -30,7 +30,7 @@ public:
 		_task_id = px4_task_spawn_cmd("bemt_optimize",
 					      SCHED_DEFAULT,
 					      SCHED_PRIORITY_DEFAULT,
-					      2200,
+					      4000,
 					      (px4_main_t)&run_trampoline,
 					      argv);
 
@@ -76,10 +76,10 @@ public:
 			R"DESCR_STR(
 ### Description
 Runs the current BEMT state-extraction model against PX4 simulation topics and
-prints per-rotor inflow and nondimensional summaries for SITL validation.
+prints per-rotor inflow, correction, and coefficient summaries for SITL validation.
 
-This module is for observation and validation only. It must not be interpreted
-as a validated aerodynamic force model.
+This module is for observation and validation only. Printed aerodynamic outputs
+remain provisional until the thesis pipeline is fully validated.
 )DESCR_STR");
 
 		PRINT_MODULE_USAGE_NAME("bemt_optimize", "template");
@@ -180,8 +180,29 @@ private:
 		input.wind_north_m_s = have_wind && PX4_ISFINITE(wind.windspeed_north) ? wind.windspeed_north : 0.0F;
 		input.wind_east_m_s = have_wind && PX4_ISFINITE(wind.windspeed_east) ? wind.windspeed_east : 0.0F;
 
+		// Copy quaternion atomically: if any component is non-finite, fall back to
+		// the identity quaternion rather than patching individual components, which
+		// would silently produce a non-unit quaternion and corrupt body-frame rotation.
+		bool q_valid = true;
+
 		for (int i = 0; i < kQuatSize; ++i) {
-			input.attitude_q[i] = PX4_ISFINITE(attitude.q[i]) ? attitude.q[i] : 0.0F;
+			if (!PX4_ISFINITE(attitude.q[i])) {
+				q_valid = false;
+				break;
+			}
+		}
+
+		if (q_valid) {
+			for (int i = 0; i < kQuatSize; ++i) {
+				input.attitude_q[i] = attitude.q[i];
+			}
+
+		} else {
+			// Defensive fallback: identity quaternion (no rotation, NED == body).
+			input.attitude_q[0] = 1.0F;
+			input.attitude_q[1] = 0.0F;
+			input.attitude_q[2] = 0.0F;
+			input.attitude_q[3] = 0.0F;
 		}
 
 		input.roll_rate_rad_s = PX4_ISFINITE(ang_vel.xyz[0]) ? ang_vel.xyz[0] : 0.0F;
@@ -223,26 +244,52 @@ private:
 			_last_print_time = hrt_absolute_time();
 
 			const int rpm_valid_count = count_valid_rpm_sources(input);
-			const char *rpm_src = (have_esc_status && rpm_valid_count > 0) ? "esc_status" : "none";
+			const char *rpm_source = (have_esc_status && rpm_valid_count > 0) ? "esc_status" : "missing_or_zero";
+			const unsigned raw_esc_rpm_m0 =
+				(have_esc_status && esc_status.esc_count > 0) ? static_cast<unsigned>(esc_status.esc[0].esc_rpm) : 0U;
 
-			PX4_INFO("[bemt] src=%s valid=%d/%d  rpm0=%.0f  cmd0=%.3f",
-				 rpm_src,
+			PX4_INFO("[bemt] src=%s valid=%d/%d raw_esc_rpm_m0=%u rpm_m0=%.1f cmd_m0=%.3f batt_v=%.2f",
+				 rpm_source,
 				 rpm_valid_count,
 				 bemt::kMotorCount,
+				 raw_esc_rpm_m0,
 				 (double)input.motor_rpm[0],
-				 (double)input.motor_command[0]);
+				 (double)input.motor_command[0],
+				 (double)input.battery_voltage_v);
 
-			PX4_INFO("[bemt] vx=%.2f vy=%.2f vz=%.2f [m/s NED]",
+			PX4_INFO("[bemt] vx=%.2f vy=%.2f vz=%.2f wind_n=%.2f wind_e=%.2f [m/s NED]",
 				 (double)input.velocity_north_m_s,
 				 (double)input.velocity_east_m_s,
-				 (double)input.velocity_down_m_s);
+				 (double)input.velocity_down_m_s,
+				 (double)input.wind_north_m_s,
+				 (double)input.wind_east_m_s);
 
-			PX4_INFO("[bemt] Vinf0=%.2f J0=%.3f Jn0=%.3f Jp0=%.3f Re0=%.0f",
-				 (double)output.v_inf_m_s[0],
-				 (double)output.j[0],
-				 (double)output.j_n[0],
-				 (double)output.j_p[0],
-				 (double)output.re_07[0]);
+			PX4_INFO("[bemt] kin V0=%.2f J=%.3f Jn=%.3f Jp=%.3f adisk=%.3f",
+				 (double)output.kinematic_v_inf_m_s[0],
+				 (double)output.kinematic_j[0],
+				 (double)output.kinematic_j_n[0],
+				 (double)output.kinematic_j_p[0],
+				 (double)output.kinematic_alpha_disk_rad[0]);
+
+			PX4_INFO("[bemt] cor V0=%.2f J=%.3f Jn=%.3f Jp=%.3f adisk=%.3f vi=%.2f",
+				 (double)output.corrected_v_inf_m_s[0],
+				 (double)output.corrected_j[0],
+				 (double)output.corrected_j_n[0],
+				 (double)output.corrected_j_p[0],
+				 (double)output.corrected_alpha_disk_rad[0],
+				 (double)output.induced_axial_velocity_m_s[0]);
+
+			PX4_INFO("[bemt] Re0=%.0f Ct0=%.4f Cq0=%.4f Cp0=%.4f [PROVISIONAL]",
+				 (double)output.re_07[0],
+				 (double)output.c_t[0],
+				 (double)output.c_q[0],
+				 (double)output.c_p[0]);
+
+			PX4_INFO("[bemt] dbg r=%.4f phi=%.3f alpha=%.3f Ftip=%.3f",
+				 (double)output.section_debug_radius_m[0],
+				 (double)output.section_debug_inflow_angle_rad[0],
+				 (double)output.section_debug_angle_of_attack_rad[0],
+				 (double)output.section_debug_tip_loss_factor[0]);
 		}
 	}
 };
