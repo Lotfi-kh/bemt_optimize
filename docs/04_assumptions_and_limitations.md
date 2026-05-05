@@ -25,8 +25,16 @@
 
 ### RPM source
 - `esc_status.esc_rpm` is the only accepted RPM source.
-- No RPM estimation from motor commands.  If `esc_status` is absent, J and Re_07 are NaN/zero.
+- No RPM estimation from motor commands.
+- If `esc_status` is absent, or if RPM is missing / non-positive, `J`, `J_n`, `J_p`, and `Re_07`
+  remain `NaN` in the offline exporter.
 - ESC RPM in SITL reflects simulated motor dynamics.  Real-hardware RPM may differ.
+
+### Axial and advance-ratio convention
+- `v_normal` is a signed axial inflow quantity.
+- `J_n` is defined from the same signed axial quantity: `J_n = v_normal / (nD)`.
+- `alpha_disk` is computed as `atan2(v_inplane, abs(v_normal))`, so it uses axial magnitude
+  in the denominator even though `v_normal` and `J_n` remain signed.
 
 ### Rotor positions
 - Four rotors at arm positions derived from `ARM_LENGTH_M = 0.175 m` and 45° arm angles.
@@ -45,8 +53,11 @@
   and `tools/ulog_to_csv.py` must both be updated.
 
 ### Timestamp synchronisation (offline tool)
-- Topics merged by nearest timestamp (`merge_asof`) with a 20 ms tolerance for fast topics
-  and 100 ms for slow topics (wind, battery).  Gaps larger than the tolerance produce NaN.
+- The flat CSV is synchronised onto the `vehicle_local_position` timeline.
+- Topics are merged by nearest timestamp (`merge_asof`) with a 20 ms tolerance for fast topics
+  and 100 ms for slow topics (`wind`, `battery_status`).
+- This is an engineering assumption for the baseline exporter; gaps larger than the tolerance
+  produce `NaN`.
 
 ## Out of scope
 

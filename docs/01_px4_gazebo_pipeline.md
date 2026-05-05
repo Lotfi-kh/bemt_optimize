@@ -77,3 +77,12 @@ python tools/ulog_to_csv.py --ulog /path/to/log.ulg --output-dir output/
 # Run tests (no .ulg or pyulog required)
 python -m pytest tests/ -v
 ```
+
+Baseline exporter conventions:
+- The flat CSV is synchronised onto the `vehicle_local_position` timeline.
+- Topic joins use `merge_asof(..., direction="nearest")` as an engineering baseline assumption.
+- Current tolerances are 20 ms for fast topics and 100 ms for slow topics (`wind`, `battery_status`).
+- `v_normal` and `J_n` are signed axial quantities.
+- `alpha_disk` uses `abs(v_normal)` in the denominator.
+- ESC RPM is the only accepted RPM source; no RPM is inferred from actuator commands.
+- If RPM is missing or invalid, `J`, `J_n`, `J_p`, and `Re_07` remain `NaN`.

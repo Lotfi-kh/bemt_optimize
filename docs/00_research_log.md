@@ -23,8 +23,14 @@ analysis.
 
 ### RPM source
 - ESC-reported RPM (`esc_status.esc[i].esc_rpm`) is the sole RPM source.
-- No RPM fabrication from command signals.  If `esc_status` is absent, RPM = 0 and
-  all RPM-dependent outputs (J, Re_07) are reported as zero / NaN.
+- No RPM fabrication from command signals in the offline exporter.
+- If `esc_status` is absent, or if RPM is missing / non-positive, the exporter leaves
+  RPM-dependent outputs (`J`, `J_n`, `J_p`, `Re_07`) as `NaN`.
+
+### Axial convention
+- `v_normal` is a signed axial inflow quantity in the rotor-axis convention used by the baseline model.
+- `J_n` is also signed because it is defined directly from `v_normal / (nD)`.
+- `alpha_disk = atan2(v_inplane, abs(v_normal))`, so the denominator uses axial magnitude.
 
 ### Key findings (SITL baseline)
 - ESC RPM available in SITL only after `bemt_optimize start` is run post-arming.
@@ -37,5 +43,9 @@ analysis.
 `tools/ulog_to_csv.py` reads a PX4 `.ulg` log and produces:
 - `output/x500_baseline_timeseries.csv` — flat, single-rate CSV.
 - `output/x500_baseline_validation_report.md` — data-quality report.
+- The flat CSV is synchronised onto the `vehicle_local_position` timeline using
+  nearest-timestamp `merge_asof` joins.
+- Current tolerances: 20 ms for fast topics and 100 ms for slow topics (`wind`, `battery_status`).
 
-Tests: `tests/test_ulog_to_csv.py` (74 tests, no pyulog or real `.ulg` required).
+Tests: `tests/test_ulog_to_csv.py` covers numerical helpers plus a higher-level
+`build_timeseries()` merge/provenance check, with no real `.ulg` or `pyulog` required.

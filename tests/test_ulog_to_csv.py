@@ -15,6 +15,7 @@ from ulog_to_csv import (
     _SUTH_C,
     _SUTH_MU_REF,
     _SUTH_T_REF_K,
+    build_timeseries,
     compute_rotor_inflow_state,
     ordered_columns,
     quat_to_euler_rad,
@@ -260,6 +261,21 @@ class TestDescentFlight:
 
 
 # ---------------------------------------------------------------------------
+# Signed axial convention in climb
+# ---------------------------------------------------------------------------
+
+class TestClimbFlight:
+    V_CLIMB = -2.0
+    RPM = 6000.0
+
+    def test_v_normal_and_j_n_are_negative_in_climb(self):
+        """Upward climb (negative NED vz) produces negative signed axial inflow."""
+        state = _inflow(0, [0.0, 0.0, self.V_CLIMB], rpm=self.RPM)
+        assert state["v_normal"][0] < 0.0
+        assert state["j_n"][0] < 0.0
+
+
+# ---------------------------------------------------------------------------
 # Missing / invalid RPM → NaN propagation for RPM-dependent outputs
 # ---------------------------------------------------------------------------
 
@@ -320,6 +336,94 @@ class TestQuaternionInputs:
         state = _inflow(0, [0.0, 0.0, 0.0])
         for key in ("v_inf", "v_normal", "v_inplane", "alpha_disk"):
             assert np.isfinite(state[key][0])
+
+
+# ---------------------------------------------------------------------------
+# Higher-level build_timeseries coverage
+# ---------------------------------------------------------------------------
+
+class TestBuildTimeseries:
+    def test_build_timeseries_merges_topics_and_preserves_missing_topic_policy(self, monkeypatch, tmp_path):
+        sentinel_ulog = object()
+
+        topics = {
+            "vehicle_local_position": pd.DataFrame({
+                "timestamp": [1_000_000, 1_020_000],
+                "x": [0.0, 0.5],
+                "y": [0.0, 0.0],
+                "z": [0.0, -0.1],
+                "vx": [5.0, 5.0],
+                "vy": [0.0, 0.0],
+                "vz": [0.0, 0.0],
+            }),
+            "vehicle_attitude": pd.DataFrame({
+                "timestamp": [995_000, 1_015_000],
+                "q[0]": [1.0, 1.0],
+                "q[1]": [0.0, 0.0],
+                "q[2]": [0.0, 0.0],
+                "q[3]": [0.0, 0.0],
+            }),
+            "vehicle_air_data": pd.DataFrame({
+                "timestamp": [999_000, 1_019_000],
+                "rho": [1.20, 1.21],
+                "baro_temp_celcius": [20.0, 21.0],
+            }),
+            "wind": pd.DataFrame({
+                "timestamp": [1_090_000],
+                "windspeed_north": [1.5],
+                "windspeed_east": [-0.5],
+            }),
+            "actuator_motors": pd.DataFrame({
+                "timestamp": [1_001_000, 1_019_000],
+                "control[0]": [0.11, 0.22],
+                "control[1]": [0.12, 0.23],
+                "control[2]": [0.13, 0.24],
+                "control[3]": [0.14, 0.25],
+            }),
+        }
+
+        def fake_load(path):
+            assert path == tmp_path / "sample.ulg"
+            return sentinel_ulog
+
+        def fake_topic_df(ulog, name, instance=0):
+            assert ulog is sentinel_ulog
+            assert instance == 0
+            return topics.get(name)
+
+        monkeypatch.setattr("ulog_to_csv._load_ulog", fake_load)
+        monkeypatch.setattr("ulog_to_csv._topic_df", fake_topic_df)
+
+        df, meta = build_timeseries(tmp_path / "sample.ulg")
+
+        assert df["timestamp_us"].tolist() == [1_000_000, 1_020_000]
+        assert df["time_s"].tolist() == pytest.approx([0.0, 0.02])
+
+        np.testing.assert_allclose(df["q_w"], [1.0, 1.0])
+        np.testing.assert_allclose(df["air_density_kg_m3"], [1.20, 1.21])
+        np.testing.assert_allclose(df["wind_n_m_s"], [1.5, 1.5])
+        np.testing.assert_allclose(df["wind_e_m_s"], [-0.5, -0.5])
+        np.testing.assert_allclose(df["motor_cmd_0"], [0.11, 0.22])
+
+        assert "vehicle_angular_velocity" in meta["topics_missing"]
+        assert "battery_status" in meta["topics_missing"]
+        assert "esc_status" in meta["topics_missing"]
+        assert "wind" in meta["topics_found"]
+
+        assert (df["has_wind"] == True).all()
+        assert (df["has_air_data"] == True).all()
+        assert (df["has_battery_status"] == False).all()
+        assert (df["has_esc_status"] == False).all()
+        assert (df["rpm_source"] == "unavailable").all()
+
+        np.testing.assert_allclose(df["roll_rate_rad_s"], [0.0, 0.0])
+        assert df["battery_voltage_v"].isna().all()
+        assert df["motor_rpm_0"].isna().all()
+        assert df["j_0"].isna().all()
+        assert df["j_n_0"].isna().all()
+        assert df["re_07_0"].isna().all()
+        assert np.isfinite(df["v_inf_0_m_s"]).all()
+        assert df["sample_valid"].all()
 
 
 # ---------------------------------------------------------------------------

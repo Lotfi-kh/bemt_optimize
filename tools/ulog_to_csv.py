@@ -5,6 +5,9 @@ tools/ulog_to_csv.py  –  PX4 SITL ULog → flat CSV + markdown validation repo
 Engineering classification: offline post-processing tool.
 Scope: baseline x500 Gazebo SITL only.
 No aerodynamic validation claims are made.
+Flat CSV rows are synchronised onto the `vehicle_local_position` timeline using
+`merge_asof(..., direction="nearest")` with 20 ms tolerance for fast topics and
+100 ms for slow topics (`wind`, `battery_status`).
 
 Usage:
     python tools/ulog_to_csv.py --ulog /path/to/log.ulg [--output-dir output/]
@@ -171,14 +174,15 @@ def compute_rotor_inflow_state(
 
     Thesis baseline equations:
         J        = V_inf  / (n D)
-        J_n      = V_normal / (n D)           (signed: inherits sign from axial component)
+        J_n      = V_normal_signed / (n D)    (signed: inherits sign from axial component)
         J_p      = V_inplane / (n D)
         Re_07    = rho * V_rel_07 * c_07 / mu
         V_rel_07 = sqrt((omega * 0.7R)^2 + V_inf^2)
-        alpha_disk = atan2(V_inplane, |V_normal|)
+        alpha_disk = atan2(V_inplane, |V_normal_signed|)
 
     If rpm is NaN or <= 0, J, J_n, J_p, and Re_07 are set to NaN.
-    V_inf, V_normal, V_inplane, and alpha_disk are always computed (no RPM required).
+    No RPM is estimated from motor command signals. V_inf, V_normal, V_inplane,
+    and alpha_disk are always computed (no RPM required).
 
     Returns:
         Dict with keys: v_inf, v_normal, v_inplane, alpha_disk, j, j_n, j_p, re_07.
@@ -202,8 +206,10 @@ def compute_rotor_inflow_state(
     axial_vec = signed_axial[:, None] * ROTOR_AXIS[None, :] # (N, 3)
     inplane_vec = inflow - axial_vec                        # (N, 3)
     v_inplane = np.linalg.norm(inplane_vec, axis=1)         # (N,)
-    v_normal = signed_axial                                 # signed; NaN for alpha uses |.|
+    v_normal = signed_axial                                 # signed axial component
     v_inf = np.sqrt(signed_axial ** 2 + v_inplane ** 2)
+    # Disk incidence uses axial magnitude in the denominator even though
+    # v_normal and J_n retain the signed axial convention.
     alpha_disk = np.arctan2(v_inplane, np.abs(signed_axial))
 
     out: Dict[str, np.ndarray] = {
@@ -264,7 +270,12 @@ def _asof(
     renames: Optional[dict] = None,
     tolerance_us: int = _SYNC_TOL_US,
 ) -> pd.DataFrame:
-    """Left-join selected columns from other onto base by nearest timestamp."""
+    """Left-join selected columns from other onto base by nearest timestamp.
+
+    This baseline exporter uses ``pd.merge_asof(..., direction="nearest")`` as
+    an engineering synchronisation assumption rather than reconstructing a true
+    multi-rate estimator timeline.
+    """
     keep = ["timestamp"] + [c for c in cols if c in other.columns]
     right = other[keep].copy()
     if renames:
@@ -285,10 +296,12 @@ def _asof(
 def build_timeseries(ulog_path: Path) -> Tuple[pd.DataFrame, dict]:
     """Load a ULog and return (timeseries_df, metadata_dict).
 
-    All required topics are extracted and synchronised by nearest timestamp
-    onto the vehicle_local_position timeline.  Missing optional topics are
-    documented in metadata and replaced by safe defaults (NaN or zero) rather
-    than fabricated values.
+    All required topics are extracted and synchronised onto the
+    ``vehicle_local_position`` timeline using nearest-timestamp
+    ``merge_asof`` joins. Fast topics use a 20 ms tolerance; slow topics
+    (currently ``wind`` and ``battery_status``) use 100 ms. Missing optional
+    topics are documented in metadata and replaced by safe defaults (NaN or
+    zero) rather than fabricated values.
     """
     ulog = _load_ulog(ulog_path)
 
@@ -296,6 +309,10 @@ def build_timeseries(ulog_path: Path) -> Tuple[pd.DataFrame, dict]:
         "input_file": str(ulog_path),
         "topics_found": [],
         "topics_missing": [],
+        "sync_base_topic": "vehicle_local_position",
+        "sync_policy": "merge_asof(direction='nearest')",
+        "fast_topic_tolerance_us": _SYNC_TOL_US,
+        "slow_topic_tolerance_us": _SLOW_TOL_US,
     }
 
     def _try(name: str, instance: int = 0) -> Optional[pd.DataFrame]:
@@ -388,7 +405,7 @@ def build_timeseries(ulog_path: Path) -> Tuple[pd.DataFrame, dict]:
         if f"motor_cmd_{i}" not in base.columns:
             base[f"motor_cmd_{i}"] = float("nan")
 
-    # --- ESC status (preferred RPM source) ---
+    # --- ESC status (preferred and only accepted RPM source) ---
     has_esc = esc is not None
     rpm_source = "esc_status" if has_esc else "unavailable"
 
@@ -412,6 +429,8 @@ def build_timeseries(ulog_path: Path) -> Tuple[pd.DataFrame, dict]:
         for col in (f"motor_rpm_{i}", f"motor_voltage_v_{i}", f"motor_current_a_{i}"):
             if col not in base.columns:
                 base[col] = float("nan")
+    # Missing or invalid RPM stays NaN; the exporter does not infer RPM from
+    # actuator command signals.
 
     # --- Derived: dynamic viscosity from temperature ---
     base["dynamic_viscosity_pa_s"] = base["air_temperature_c"].apply(sutherland_viscosity)
@@ -556,12 +575,24 @@ def write_report(df: pd.DataFrame, meta: dict, output_path: Path) -> None:
         f"- Timestamps monotonically increasing: {'yes' if monotonic else '**NO — non-monotonic timestamps detected**'}",
         f"- Rows with `sample_valid = True`: {int(df['sample_valid'].sum())}",
         "",
+        "## Synchronisation policy",
+        f"- Base timeline: `{meta['sync_base_topic']}`",
+        f"- Join method: `{meta['sync_policy']}`",
+        f"- Fast-topic tolerance: {meta['fast_topic_tolerance_us']} µs",
+        f"- Slow-topic tolerance: {meta['slow_topic_tolerance_us']} µs (`wind`, `battery_status`)",
+        "- This flat CSV alignment is an engineering assumption for the baseline exporter.",
+        "",
         "## Quaternion quality",
         f"- Samples with |‖q‖ − 1| ≤ 0.01: {q_ok} / {len(df)}",
         *([] if q_bad == 0 else [f"- **Warning:** {q_bad} sample(s) outside quaternion norm tolerance."]),
         "",
+        "## Variable conventions",
+        "- `v_normal_*_m_s` and `j_n_*` are signed axial quantities.",
+        "- `alpha_disk_*_rad = atan2(v_inplane, abs(v_normal))`, so the denominator uses axial magnitude.",
+        "",
         "## RPM availability",
         f"- Source: `{meta['rpm_source']}`",
+        "- No RPM is estimated from actuator command signals.",
     ]
 
     for i in range(MOTOR_COUNT):
@@ -605,6 +636,7 @@ def write_report(df: pd.DataFrame, meta: dict, output_path: Path) -> None:
            if meta["has_esc"]
            else "**topic absent — J, J_n, J_p, Re_07 are NaN.** "
                 "RPM was not estimated or fabricated from command signals."),
+        "- **Axial convention:** `v_normal` and `J_n` remain signed; `alpha_disk` uses `abs(v_normal)`.",
         "",
         "## Limitations",
         "- Results apply only to PX4/Gazebo x500 simulation conditions.",

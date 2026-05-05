@@ -1,0 +1,5 @@
+menuconfig MODULES_BEMT_OPTIMIZER
+	bool "bemt_optimizer"
+	default n
+	---help---
+		Enable support for bemt_optimizer

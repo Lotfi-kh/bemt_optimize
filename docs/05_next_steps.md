@@ -6,6 +6,8 @@
 - [ ] Run `tools/ulog_to_csv.py` on the log and review the validation report for:
   - Quaternion norm quality (expect all samples within tolerance).
   - ESC RPM availability (expect `rpm_source = esc_status`).
+  - Missing RPM handling (expect no command-based RPM fabrication; RPM-dependent outputs stay `NaN` where RPM is unavailable).
+  - Signed axial convention (expect `J_n` sign to follow `v_normal`, while `alpha_disk` uses `abs(v_normal)`).
   - J range in forward flight (expect J ≈ 0.05–0.5 for typical airspeeds).
   - Re_07 range (expect ~50 000–120 000 at typical RPMs).
 - [ ] Plot J vs. airspeed and Re_07 vs. RPM from the CSV to confirm expected trends.
