@@ -1,0 +1,102 @@
+From: bemt_optimize module <noreply>
+Subject: Add BemtRotorState uORB message and logger registration
+
+Three changes to the PX4-Autopilot tree are required to build and log
+the bemt_rotor_state topic published by the bemt_optimize module:
+
+  1. msg/BemtRotorState.msg        — new uORB message definition
+  2. msg/CMakeLists.txt            — register the message so the build
+                                     generates the C header
+  3. src/modules/logger/logged_topics.cpp
+                                   — wire the topic into the .ulg logger
+
+Apply from the root of your PX4-Autopilot clone:
+
+    git apply patches/px4_bemt_rotor_state.patch
+
+---
+ msg/BemtRotorState.msg                        | 44 +++++++++++++++++++
+ msg/CMakeLists.txt                            |  1 +
+ src/modules/logger/logged_topics.cpp          |  2 +
+ 3 files changed, 47 insertions(+)
+ create mode 100644 msg/BemtRotorState.msg
+
+diff --git a/msg/BemtRotorState.msg b/msg/BemtRotorState.msg
+new file mode 100644
+--- /dev/null
++++ b/msg/BemtRotorState.msg
+@@ -0,0 +1,44 @@
++# Baseline BEMT per-rotor kinematic and corrected rotor-state outputs.
++# Published by bemt_optimize during PX4/Gazebo x500 SITL validation.
++#
++# Scope: PX4/Gazebo x500 SITL simulation only.
++# Not aerodynamic truth. Not hardware equivalence.
++#
++# Conventions (preserved exactly):
++#   signed_axial_speed  -- signed; negative in climb, positive in descent
++#   v_normal            -- |signed_axial_speed| (non-negative)
++#   J_n                 -- signed (follows signed_axial_speed / (n*D))
++#   alpha_disk          -- atan2(v_inplane, abs(v_normal))  [rad]
++#   SI units only.
++
++uint64 timestamp                                    # time since system start (microseconds)
++
++float32[4] motor_rpm                                # per-rotor RPM (0 when unavailable)
++uint8 rpm_valid_flags                               # bitmask: bit i=1 when motor i RPM > 0
++bool sample_valid                                   # true when bemt::calculate() accepted input
++
++# --- Kinematic rotor-state (before induced-velocity correction) ---
++float32[4] kinematic_signed_axial_speed_m_s         # signed axial inflow [m/s]
++float32[4] kinematic_v_normal_m_s                   # |signed_axial_speed| [m/s]
++float32[4] kinematic_v_inplane_m_s                  # in-plane inflow magnitude [m/s]
++float32[4] kinematic_v_inf_m_s                      # resultant inflow speed [m/s]
++float32[4] kinematic_alpha_disk_rad                 # disk incidence angle [rad]
++float32[4] kinematic_j                              # advance ratio J = v_inf / (n*D)
++float32[4] kinematic_j_n                            # signed axial advance ratio J_n
++float32[4] kinematic_j_p                            # in-plane advance ratio J_p
++
++# --- Induced axial velocity (single-shot momentum-theory approximation) ---
++float32[4] induced_axial_velocity_m_s               # [m/s]; 0 when thrust <= 0
++
++# --- Corrected rotor-state (after induced-velocity correction) ---
++float32[4] corrected_signed_axial_speed_m_s         # signed axial inflow + correction [m/s]
++float32[4] corrected_v_normal_m_s                   # |corrected_signed_axial| [m/s]
++float32[4] corrected_v_inplane_m_s                  # in-plane inflow magnitude [m/s]
++float32[4] corrected_v_inf_m_s                      # resultant inflow speed [m/s]
++float32[4] corrected_alpha_disk_rad                 # disk incidence angle [rad]
++float32[4] corrected_j                              # advance ratio J (corrected)
++float32[4] corrected_j_n                            # signed axial advance ratio J_n (corrected)
++float32[4] corrected_j_p                            # in-plane advance ratio J_p (corrected)
++
++# --- Reynolds number at 0.7R (using corrected v_inf) ---
++float32[4] re_07                                    # Reynolds number at 0.7R chord
+diff --git a/msg/CMakeLists.txt b/msg/CMakeLists.txt
+--- a/msg/CMakeLists.txt
++++ b/msg/CMakeLists.txt
+@@ -53,6 +53,7 @@ set(msg_files
+ 	ArmingCheckRequest.msg
+ 	AutotuneAttitudeControlStatus.msg
+ 	BatteryStatus.msg
++	BemtRotorState.msg
+ 	Buffer128.msg
+ 	ButtonEvent.msg
+ 	CameraCapture.msg
+diff --git a/src/modules/logger/logged_topics.cpp b/src/modules/logger/logged_topics.cpp
+--- a/src/modules/logger/logged_topics.cpp
++++ b/src/modules/logger/logged_topics.cpp
+@@ -63,6 +63,7 @@ void LoggedTopics::add_default_topics()
+ 	add_optional_topic("external_ins_attitude");
+ 	add_optional_topic("external_ins_global_position");
+ 	add_optional_topic("external_ins_local_position");
++	add_optional_topic("bemt_rotor_state", 100);
+ 	add_optional_topic("esc_status", 250);
+ 	add_topic("failure_detector_status", 100);
+ 	add_topic("failsafe_flags");
+@@ -319,6 +320,7 @@ void LoggedTopics::add_high_rate_topics()
+
+ 	add_topic("esc_status", 5);
+ 	add_topic("actuator_motors");
++	add_optional_topic("bemt_rotor_state", 100);
+ 	add_topic("actuator_outputs_debug");
+ 	add_topic("actuator_servos");
+ 	add_topic_multi("vehicle_thrust_setpoint", 0, 2);
