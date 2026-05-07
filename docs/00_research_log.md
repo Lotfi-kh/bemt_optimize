@@ -22,10 +22,20 @@ analysis.
   z = +0.06 m in SDF FLU (z-up).
 
 ### RPM source
-- ESC-reported RPM (`esc_status.esc[i].esc_rpm`) is the sole RPM source.
+- ESC-reported RPM (`esc_status.esc[i].esc_rpm`) is the sole RPM source in the BEMT module.
 - No RPM fabrication from command signals in the offline exporter.
 - If `esc_status` is absent, or if RPM is missing / non-positive, the exporter leaves
   RPM-dependent outputs (`J`, `J_n`, `J_p`, `Re_07`) as `NaN`.
+
+### uORB publication (`bemt_rotor_state`)
+- `bemt_optimize` now publishes a `bemt_rotor_state` uORB topic at ~10 Hz containing
+  per-rotor kinematic and corrected rotor-state outputs from `bemt::Output`.
+- The topic is registered in `src/modules/logger/logged_topics.cpp` so it is written
+  into `.ulg` files automatically when the module is running.
+- `tools/ulog_to_csv.py` reads this topic first when present, providing direct access to
+  the C++-computed values including the induced-velocity correction.  The offline reconstruction
+  path remains as a documented fallback for logs collected before this topic was introduced.
+- `rotor_state_source` provenance column records which path was used.
 
 ### Axial convention
 - `v_normal` is a signed axial inflow quantity in the rotor-axis convention used by the baseline model.

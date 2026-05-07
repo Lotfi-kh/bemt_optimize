@@ -19,8 +19,25 @@ Gazebo (gz-sim)
                             │
                     bemt::calculate(input, output)
                             │
-                    PX4_INFO log lines (1 Hz)
+              ┌─────────────┴──────────────────────────┐
+              │                                        │
+      PX4_INFO log (1 Hz)         bemt_rotor_state (uORB, 10 Hz)
+                                          │
+                                  PX4 logger → .ulg
+                                          │
+                              tools/ulog_to_csv.py
+                                          │
+                            x500_baseline_timeseries.csv
+                          x500_baseline_validation_report.md
 ```
+
+**Preferred data path**: `bemt_rotor_state` uORB topic → `.ulg` → Python exporter.
+`bemt_rotor_state` carries both kinematic and corrected rotor-state values with timestamps
+aligned to the actual C++ computation, eliminating multi-topic synchronisation uncertainty.
+
+**Fallback path**: if `bemt_rotor_state` is absent from the `.ulg`, the Python exporter
+reconstructs kinematic-only values offline from generic PX4 topics using `merge_asof`.
+Only kinematic columns are available on the fallback path; `corrected_*` columns are absent.
 
 ## Topic details
 
@@ -33,6 +50,21 @@ Gazebo (gz-sim)
 | `vehicle_air_data` | `baro_temp_celcius` | °C | Used for Sutherland viscosity |
 | `wind` | `windspeed_north/east` | m/s | Set to 0 if topic absent |
 | `battery_status` | `voltage_v` | V | Used for motor voltage fallback |
+| `bemt_rotor_state` | all fields | SI | Published by `bemt_optimize`; logged by PX4 logger |
+
+### `bemt_rotor_state` topic
+
+Defined in `msg/BemtRotorState.msg`.  Published at ~10 Hz by the `bemt_optimize` module.
+Registered in `src/modules/logger/logged_topics.cpp` as `add_optional_topic("bemt_rotor_state", 100)`.
+Absent from logs collected before this topic was introduced; Python exporter falls back to reconstruction.
+
+| Field group | Fields | Notes |
+|---|---|---|
+| RPM | `motor_rpm[4]`, `rpm_valid_flags` | Sourced from `esc_status`; bitmask validity |
+| Kinematic | `kinematic_signed_axial_speed_m_s[4]`, `kinematic_v_normal_m_s[4]`, ... | Before induced correction |
+| Induced | `induced_axial_velocity_m_s[4]` | Single-shot momentum-theory approximation |
+| Corrected | `corrected_signed_axial_speed_m_s[4]`, ... | After induced correction |
+| Reynolds | `re_07[4]` | At 0.7R chord, using corrected v_inf |
 
 ## Coordinate frames
 

@@ -36,9 +36,13 @@ No RPM is fabricated from actuator commands. If RPM is missing or invalid, the e
 | `TestMissingRpm` (parametrised) | NaN/0/negative RPM → `J`, `J_n`, `J_p`, `Re_07` = `NaN`; `v_inf` and `alpha_disk` remain finite |
 | `TestQuaternionInputs` | All-motor symmetry at hover; finite output for zero velocity |
 | `TestBuildTimeseries` | `vehicle_local_position` timeline sync, merged output columns, provenance flags, and missing-topic defaults together |
+| `TestBuildTimeseriesWithBemtTopic` | Preferred path: `bemt_rotor_state` present; rotor_state_source correct; kinematic/corrected columns present; legacy columns populated from kinematic signed axial |
+| `TestBuildTimeseriesFallbackReconstruction` | Fallback path: topic absent; rotor_state_source = reconstruction; corrected columns absent |
+| `TestBemtTopicPreference` | v_inf and re_07 sourced from BEMT topic, not offline reconstruction |
+| `TestMergeBemtHelpers` | Unit tests for _merge_bemt_legacy and _merge_bemt_new_cols |
 | `TestTimestampMonotonicity` | Sorted/shuffled/duplicate timestamp detection |
-| `TestSchema` | SI suffixes; motor column count; advance-ratio column count |
-| `TestProvenance` | Provenance flags; no c_t/c_q/c_p columns |
+| `TestSchema` | SI suffixes; motor column count; advance-ratio column count; kinematic/corrected schema |
+| `TestProvenance` | Provenance flags; no c_t/c_q/c_p columns; rotor_state_source; has_bemt_topic |
 
 ## Known limitations
 
@@ -49,3 +53,7 @@ No RPM is fabricated from actuator commands. If RPM is missing or invalid, the e
 - No wind measurement available in typical SITL logs; tool assumes zero wind when absent.
 - Flat CSV synchronisation uses nearest-timestamp joins onto the `vehicle_local_position` timeline;
   this is a baseline engineering assumption, not a validated estimator reconstruction.
+- `bemt_rotor_state` is absent from logs collected before this topic was introduced; the
+  Python exporter falls back to reconstruction for those logs automatically.
+- Corrected columns (`corrected_*`) are only available when the `bemt_rotor_state` topic
+  is present; they are absent from fallback-path CSVs.

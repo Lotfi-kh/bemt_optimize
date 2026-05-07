@@ -21,6 +21,8 @@ from ulog_to_csv import (
     quat_to_euler_rad,
     rotate_ned_to_body,
     sutherland_viscosity,
+    _merge_bemt_legacy,
+    _merge_bemt_new_cols,
 )
 
 # ---------------------------------------------------------------------------
@@ -415,6 +417,8 @@ class TestBuildTimeseries:
         assert (df["has_battery_status"] == False).all()
         assert (df["has_esc_status"] == False).all()
         assert (df["rpm_source"] == "unavailable").all()
+        assert (df["rotor_state_source"] == "reconstruction").all()
+        assert (df["has_bemt_topic"] == False).all()  # noqa: E712
 
         np.testing.assert_allclose(df["roll_rate_rad_s"], [0.0, 0.0])
         assert df["battery_voltage_v"].isna().all()
@@ -516,3 +520,286 @@ class TestProvenance:
 
     def test_sample_valid_column_in_schema(self):
         assert "sample_valid" in _FIXED_COLS
+
+    def test_rotor_state_source_in_schema(self):
+        assert "rotor_state_source" in _FIXED_COLS
+
+    def test_has_bemt_topic_in_schema(self):
+        assert "has_bemt_topic" in _FIXED_COLS
+
+    def test_kinematic_full_columns_in_schema(self):
+        for i in range(MOTOR_COUNT):
+            for col in (
+                f"kinematic_signed_axial_speed_{i}_m_s",
+                f"kinematic_v_normal_{i}_m_s",
+                f"kinematic_v_inf_{i}_m_s",
+                f"kinematic_j_{i}",
+                f"kinematic_j_n_{i}",
+                f"kinematic_j_p_{i}",
+            ):
+                assert col in _FIXED_COLS, f"Missing: {col}"
+
+    def test_corrected_columns_in_schema(self):
+        for i in range(MOTOR_COUNT):
+            for col in (
+                f"corrected_v_inf_{i}_m_s",
+                f"corrected_j_{i}",
+                f"corrected_j_n_{i}",
+                f"corrected_j_p_{i}",
+                f"induced_axial_velocity_{i}_m_s",
+            ):
+                assert col in _FIXED_COLS, f"Missing: {col}"
+
+
+# ---------------------------------------------------------------------------
+# BEMT topic: source preference and column presence
+# ---------------------------------------------------------------------------
+
+def _make_base_topics():
+    """Minimal topics dict for build_timeseries that satisfies required topics."""
+    return {
+        "vehicle_local_position": pd.DataFrame({
+            "timestamp": [1_000_000, 1_020_000],
+            "x": [0.0, 0.5], "y": [0.0, 0.0], "z": [0.0, -0.1],
+            "vx": [5.0, 5.0], "vy": [0.0, 0.0], "vz": [0.0, 0.0],
+        }),
+        "vehicle_attitude": pd.DataFrame({
+            "timestamp": [995_000, 1_015_000],
+            "q[0]": [1.0, 1.0], "q[1]": [0.0, 0.0],
+            "q[2]": [0.0, 0.0], "q[3]": [0.0, 0.0],
+        }),
+        "vehicle_air_data": pd.DataFrame({
+            "timestamp": [999_000, 1_019_000],
+            "rho": [1.20, 1.21], "baro_temp_celcius": [20.0, 21.0],
+        }),
+    }
+
+
+def _make_bemt_topic():
+    """Minimal bemt_rotor_state DataFrame for two timestamps."""
+    data: dict = {"timestamp": [1_000_000, 1_020_000]}
+    for i in range(MOTOR_COUNT):
+        data[f"motor_rpm[{i}]"] = [6000.0, 6100.0]
+        data[f"kinematic_signed_axial_speed_m_s[{i}]"] = [-0.10, -0.12]
+        data[f"kinematic_v_normal_m_s[{i}]"] = [0.10, 0.12]
+        data[f"kinematic_v_inplane_m_s[{i}]"] = [5.0, 5.1]
+        data[f"kinematic_v_inf_m_s[{i}]"] = [5.001, 5.101]
+        data[f"kinematic_alpha_disk_rad[{i}]"] = [1.55, 1.54]
+        data[f"kinematic_j[{i}]"] = [0.077, 0.078]
+        data[f"kinematic_j_n[{i}]"] = [-0.002, -0.002]
+        data[f"kinematic_j_p[{i}]"] = [0.077, 0.078]
+        data[f"induced_axial_velocity_m_s[{i}]"] = [2.1, 2.2]
+        data[f"corrected_signed_axial_speed_m_s[{i}]"] = [2.0, 2.08]
+        data[f"corrected_v_normal_m_s[{i}]"] = [2.0, 2.08]
+        data[f"corrected_v_inplane_m_s[{i}]"] = [5.0, 5.1]
+        data[f"corrected_v_inf_m_s[{i}]"] = [5.39, 5.49]
+        data[f"corrected_alpha_disk_rad[{i}]"] = [1.19, 1.18]
+        data[f"corrected_j[{i}]"] = [0.083, 0.084]
+        data[f"corrected_j_n[{i}]"] = [0.031, 0.032]
+        data[f"corrected_j_p[{i}]"] = [0.077, 0.078]
+        data[f"re_07[{i}]"] = [55_000.0, 56_000.0]
+    return pd.DataFrame(data)
+
+
+def _patch_topics(monkeypatch, topics):
+    sentinel = object()
+
+    def fake_load(path):
+        return sentinel
+
+    def fake_topic_df(ulog, name, instance=0):
+        assert ulog is sentinel
+        return topics.get(name)
+
+    monkeypatch.setattr("ulog_to_csv._load_ulog", fake_load)
+    monkeypatch.setattr("ulog_to_csv._topic_df", fake_topic_df)
+
+
+class TestBuildTimeseriesWithBemtTopic:
+    """build_timeseries preferred path: bemt_rotor_state topic is present."""
+
+    def test_rotor_state_source_is_bemt_topic(self, monkeypatch, tmp_path):
+        topics = _make_base_topics()
+        topics["bemt_rotor_state"] = _make_bemt_topic()
+        _patch_topics(monkeypatch, topics)
+        df, meta = build_timeseries(tmp_path / "sample.ulg")
+        assert (df["rotor_state_source"] == "bemt_rotor_state").all()
+        assert meta["rotor_state_source"] == "bemt_rotor_state"
+        assert meta["has_bemt_topic"] is True
+
+    def test_has_bemt_topic_flag_true(self, monkeypatch, tmp_path):
+        topics = _make_base_topics()
+        topics["bemt_rotor_state"] = _make_bemt_topic()
+        _patch_topics(monkeypatch, topics)
+        df, _ = build_timeseries(tmp_path / "sample.ulg")
+        assert (df["has_bemt_topic"] == True).all()  # noqa: E712
+
+    def test_kinematic_columns_present(self, monkeypatch, tmp_path):
+        topics = _make_base_topics()
+        topics["bemt_rotor_state"] = _make_bemt_topic()
+        _patch_topics(monkeypatch, topics)
+        df, _ = build_timeseries(tmp_path / "sample.ulg")
+        for i in range(MOTOR_COUNT):
+            assert f"kinematic_v_inf_{i}_m_s" in df.columns
+            assert f"kinematic_j_{i}" in df.columns
+            assert f"kinematic_j_n_{i}" in df.columns
+
+    def test_corrected_columns_present(self, monkeypatch, tmp_path):
+        topics = _make_base_topics()
+        topics["bemt_rotor_state"] = _make_bemt_topic()
+        _patch_topics(monkeypatch, topics)
+        df, _ = build_timeseries(tmp_path / "sample.ulg")
+        for i in range(MOTOR_COUNT):
+            assert f"corrected_v_inf_{i}_m_s" in df.columns
+            assert f"corrected_j_{i}" in df.columns
+            assert f"induced_axial_velocity_{i}_m_s" in df.columns
+
+    def test_legacy_columns_populated_from_kinematic_signed_axial(self, monkeypatch, tmp_path):
+        """v_normal_*_m_s must carry the SIGNED axial value from kinematic_signed_axial_speed."""
+        topics = _make_base_topics()
+        topics["bemt_rotor_state"] = _make_bemt_topic()
+        _patch_topics(monkeypatch, topics)
+        df, _ = build_timeseries(tmp_path / "sample.ulg")
+        bemt = _make_bemt_topic()
+        np.testing.assert_allclose(
+            df["v_normal_0_m_s"].values,
+            bemt["kinematic_signed_axial_speed_m_s[0]"].values,
+            rtol=1e-5,
+        )
+
+    def test_legacy_j_populated_from_kinematic_j(self, monkeypatch, tmp_path):
+        topics = _make_base_topics()
+        topics["bemt_rotor_state"] = _make_bemt_topic()
+        _patch_topics(monkeypatch, topics)
+        df, _ = build_timeseries(tmp_path / "sample.ulg")
+        bemt = _make_bemt_topic()
+        np.testing.assert_allclose(
+            df["j_0"].values,
+            bemt["kinematic_j[0]"].values,
+            rtol=1e-5,
+        )
+
+    def test_bemt_topic_in_topics_found(self, monkeypatch, tmp_path):
+        topics = _make_base_topics()
+        topics["bemt_rotor_state"] = _make_bemt_topic()
+        _patch_topics(monkeypatch, topics)
+        _, meta = build_timeseries(tmp_path / "sample.ulg")
+        assert "bemt_rotor_state" in meta["topics_found"]
+
+
+class TestBuildTimeseriesFallbackReconstruction:
+    """build_timeseries fallback path: bemt_rotor_state topic is absent."""
+
+    def test_rotor_state_source_is_reconstruction(self, monkeypatch, tmp_path):
+        topics = _make_base_topics()
+        _patch_topics(monkeypatch, topics)
+        df, meta = build_timeseries(tmp_path / "sample.ulg")
+        assert (df["rotor_state_source"] == "reconstruction").all()
+        assert meta["rotor_state_source"] == "reconstruction"
+        assert meta["has_bemt_topic"] is False
+
+    def test_has_bemt_topic_flag_false(self, monkeypatch, tmp_path):
+        topics = _make_base_topics()
+        _patch_topics(monkeypatch, topics)
+        df, _ = build_timeseries(tmp_path / "sample.ulg")
+        assert (df["has_bemt_topic"] == False).all()  # noqa: E712
+
+    def test_corrected_columns_absent(self, monkeypatch, tmp_path):
+        """Corrected columns must not appear when only reconstruction is available."""
+        topics = _make_base_topics()
+        _patch_topics(monkeypatch, topics)
+        df, _ = build_timeseries(tmp_path / "sample.ulg")
+        for i in range(MOTOR_COUNT):
+            assert f"corrected_v_inf_{i}_m_s" not in df.columns
+            assert f"induced_axial_velocity_{i}_m_s" not in df.columns
+
+    def test_legacy_columns_still_present(self, monkeypatch, tmp_path):
+        """Legacy columns (v_inf_*, j_*, etc.) must be present from reconstruction."""
+        topics = _make_base_topics()
+        _patch_topics(monkeypatch, topics)
+        df, _ = build_timeseries(tmp_path / "sample.ulg")
+        for i in range(MOTOR_COUNT):
+            assert f"v_inf_{i}_m_s" in df.columns
+            assert f"j_{i}" in df.columns
+
+    def test_bemt_topic_in_topics_missing(self, monkeypatch, tmp_path):
+        topics = _make_base_topics()
+        _patch_topics(monkeypatch, topics)
+        _, meta = build_timeseries(tmp_path / "sample.ulg")
+        assert "bemt_rotor_state" in meta["topics_missing"]
+
+
+class TestBemtTopicPreference:
+    """When bemt_rotor_state is present, it must be preferred over reconstruction."""
+
+    def test_prefers_bemt_topic_values_over_reconstruction(self, monkeypatch, tmp_path):
+        """v_inf_0_m_s must come from the BEMT topic, not offline reconstruction."""
+        topics = _make_base_topics()
+        bemt = _make_bemt_topic()
+        topics["bemt_rotor_state"] = bemt
+        _patch_topics(monkeypatch, topics)
+        df, _ = build_timeseries(tmp_path / "sample.ulg")
+        np.testing.assert_allclose(
+            df["v_inf_0_m_s"].values,
+            bemt["kinematic_v_inf_m_s[0]"].values,
+            rtol=1e-5,
+        )
+
+    def test_re_07_comes_from_bemt_topic(self, monkeypatch, tmp_path):
+        topics = _make_base_topics()
+        bemt = _make_bemt_topic()
+        topics["bemt_rotor_state"] = bemt
+        _patch_topics(monkeypatch, topics)
+        df, _ = build_timeseries(tmp_path / "sample.ulg")
+        np.testing.assert_allclose(
+            df["re_07_0"].values,
+            bemt["re_07[0]"].values,
+            rtol=1e-5,
+        )
+
+
+class TestMergeBemtHelpers:
+    """Unit tests for _merge_bemt_legacy and _merge_bemt_new_cols."""
+
+    def _base_df(self):
+        return pd.DataFrame({
+            "timestamp": [1_000_000, 1_020_000],
+            "dummy": [0.0, 0.0],
+        })
+
+    def test_legacy_merge_populates_v_normal_from_signed_axial(self):
+        base = self._base_df()
+        bemt = pd.DataFrame({
+            "timestamp": [1_000_000, 1_020_000],
+            "kinematic_signed_axial_speed_m_s[0]": [-0.5, -0.6],
+            "kinematic_v_inplane_m_s[0]": [3.0, 3.1],
+            "kinematic_v_inf_m_s[0]": [3.04, 3.16],
+            "kinematic_alpha_disk_rad[0]": [1.4, 1.4],
+            "kinematic_j[0]": [0.046, 0.048],
+            "kinematic_j_n[0]": [-0.007, -0.009],
+            "kinematic_j_p[0]": [0.046, 0.048],
+            "re_07[0]": [50_000.0, 51_000.0],
+        })
+        result = _merge_bemt_legacy(base, bemt)
+        np.testing.assert_allclose(result["v_normal_0_m_s"], [-0.5, -0.6], rtol=1e-5)
+        np.testing.assert_allclose(result["j_0"], [0.046, 0.048], rtol=1e-5)
+
+    def test_new_cols_merge_adds_kinematic_full_names(self):
+        base = self._base_df()
+        bemt = pd.DataFrame({
+            "timestamp": [1_000_000, 1_020_000],
+            "kinematic_v_inf_m_s[0]": [3.0, 3.1],
+            "kinematic_j[0]": [0.046, 0.048],
+            "kinematic_alpha_disk_rad[0]": [1.4, 1.4],
+            "corrected_v_inf_m_s[0]": [4.0, 4.1],
+            "corrected_j[0]": [0.06, 0.063],
+            "induced_axial_velocity_m_s[0]": [2.0, 2.1],
+        })
+        result = _merge_bemt_new_cols(base, bemt)
+        assert "kinematic_v_inf_0_m_s" in result.columns
+        assert "kinematic_j_0" in result.columns
+        assert "kinematic_alpha_disk_0_rad" in result.columns
+        assert "corrected_v_inf_0_m_s" in result.columns
+        assert "induced_axial_velocity_0_m_s" in result.columns
+        np.testing.assert_allclose(result["kinematic_v_inf_0_m_s"], [3.0, 3.1], rtol=1e-5)
+        np.testing.assert_allclose(result["corrected_j_0"], [0.06, 0.063], rtol=1e-5)

@@ -5,9 +5,11 @@
 #include <px4_platform_common/log.h>
 #include <px4_platform_common/module.h>
 #include <px4_platform_common/posix.h>
+#include <uORB/Publication.hpp>
 #include <uORB/Subscription.hpp>
 #include <uORB/topics/actuator_motors.h>
 #include <uORB/topics/battery_status.h>
+#include <uORB/topics/bemt_rotor_state.h>
 #include <uORB/topics/esc_status.h>
 #include <uORB/topics/vehicle_air_data.h>
 #include <uORB/topics/vehicle_angular_velocity.h>
@@ -91,6 +93,8 @@ remain provisional until the thesis pipeline is fully validated.
 private:
 	static constexpr int kQuatSize = 4;
 	static constexpr float kMinUsefulRpm = 1.0F;
+
+	uORB::Publication<bemt_rotor_state_s> _bemt_rotor_state_pub{ORB_ID(bemt_rotor_state)};
 
 	uORB::Subscription _vehicle_local_position_sub{ORB_ID(vehicle_local_position)};
 	uORB::Subscription _vehicle_attitude_sub{ORB_ID(vehicle_attitude)};
@@ -291,6 +295,48 @@ private:
 				 (double)output.section_debug_angle_of_attack_rad[0],
 				 (double)output.section_debug_tip_loss_factor[0]);
 		}
+
+		// Publish per-rotor BEMT state so the PX4 logger writes it into the .ulg.
+		// Values are copied directly from the already-computed Output struct; no physics
+		// is duplicated here.
+		bemt_rotor_state_s brs{};
+		brs.timestamp = hrt_absolute_time();
+		brs.sample_valid = true;
+
+		uint8_t rpm_flags = 0;
+
+		for (int i = 0; i < bemt::kMotorCount; ++i) {
+			brs.motor_rpm[i] = input.motor_rpm[i];
+
+			if (input.motor_rpm[i] > kMinUsefulRpm) {
+				rpm_flags |= static_cast<uint8_t>(1u << i);
+			}
+
+			brs.kinematic_signed_axial_speed_m_s[i] = output.kinematic_signed_axial_speed_m_s[i];
+			brs.kinematic_v_normal_m_s[i]            = output.kinematic_v_normal_m_s[i];
+			brs.kinematic_v_inplane_m_s[i]           = output.kinematic_v_inplane_m_s[i];
+			brs.kinematic_v_inf_m_s[i]               = output.kinematic_v_inf_m_s[i];
+			brs.kinematic_alpha_disk_rad[i]           = output.kinematic_alpha_disk_rad[i];
+			brs.kinematic_j[i]                        = output.kinematic_j[i];
+			brs.kinematic_j_n[i]                      = output.kinematic_j_n[i];
+			brs.kinematic_j_p[i]                      = output.kinematic_j_p[i];
+
+			brs.induced_axial_velocity_m_s[i]         = output.induced_axial_velocity_m_s[i];
+
+			brs.corrected_signed_axial_speed_m_s[i]  = output.corrected_signed_axial_speed_m_s[i];
+			brs.corrected_v_normal_m_s[i]            = output.corrected_v_normal_m_s[i];
+			brs.corrected_v_inplane_m_s[i]           = output.corrected_v_inplane_m_s[i];
+			brs.corrected_v_inf_m_s[i]               = output.corrected_v_inf_m_s[i];
+			brs.corrected_alpha_disk_rad[i]           = output.corrected_alpha_disk_rad[i];
+			brs.corrected_j[i]                        = output.corrected_j[i];
+			brs.corrected_j_n[i]                      = output.corrected_j_n[i];
+			brs.corrected_j_p[i]                      = output.corrected_j_p[i];
+
+			brs.re_07[i] = output.re_07[i];
+		}
+
+		brs.rpm_valid_flags = rpm_flags;
+		_bemt_rotor_state_pub.publish(brs);
 	}
 };
 

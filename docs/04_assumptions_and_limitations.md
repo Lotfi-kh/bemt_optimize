@@ -52,12 +52,23 @@
   If the quaternion convention changes, `rotate_ned_to_body()` in `bemt_model.cpp`
   and `tools/ulog_to_csv.py` must both be updated.
 
+### Rotor-state source (offline tool)
+- **Preferred path**: `bemt_rotor_state` uORB topic, logged at ~10 Hz.
+  Values are computed and timestamped by the C++ BEMT module; synchronisation uncertainty
+  between topics is eliminated.  Both kinematic and corrected columns are available.
+- **Fallback path**: if `bemt_rotor_state` is absent, rotor state is reconstructed offline
+  from generic PX4 topics.  Only kinematic values are available; `corrected_*` columns
+  are absent from the CSV.  The `rotor_state_source` provenance column indicates which
+  path was used.
+
 ### Timestamp synchronisation (offline tool)
 - The flat CSV is synchronised onto the `vehicle_local_position` timeline.
 - Topics are merged by nearest timestamp (`merge_asof`) with a 20 ms tolerance for fast topics
   and 100 ms for slow topics (`wind`, `battery_status`).
 - This is an engineering assumption for the baseline exporter; gaps larger than the tolerance
   produce `NaN`.
+- When `bemt_rotor_state` is present, its values are merged at 20 ms tolerance onto the same
+  base timeline.
 
 ## Out of scope
 

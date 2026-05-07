@@ -290,6 +290,85 @@ def _asof(
 
 
 # ---------------------------------------------------------------------------
+# BEMT topic merge helpers.
+# ---------------------------------------------------------------------------
+
+def _merge_bemt_legacy(base: pd.DataFrame, bemt_df: pd.DataFrame) -> pd.DataFrame:
+    """Map bemt_rotor_state kinematic fields onto legacy per-rotor CSV column names.
+
+    This preserves backward compatibility: tools reading the old column names
+    (v_inf_*_m_s, v_normal_*_m_s, j_*, re_07_*) continue to work unchanged.
+    v_normal_*_m_s is mapped from kinematic_signed_axial_speed_m_s (the signed
+    quantity), matching the sign convention used in the Python reconstruction path.
+    """
+    cols: list = []
+    renames: dict = {}
+    for i in range(MOTOR_COUNT):
+        for src, dst in [
+            (f"kinematic_signed_axial_speed_m_s[{i}]", f"v_normal_{i}_m_s"),
+            (f"kinematic_v_inplane_m_s[{i}]",           f"v_inplane_{i}_m_s"),
+            (f"kinematic_v_inf_m_s[{i}]",               f"v_inf_{i}_m_s"),
+            (f"kinematic_alpha_disk_rad[{i}]",           f"alpha_disk_{i}_rad"),
+            (f"kinematic_j[{i}]",                        f"j_{i}"),
+            (f"kinematic_j_n[{i}]",                      f"j_n_{i}"),
+            (f"kinematic_j_p[{i}]",                      f"j_p_{i}"),
+            (f"re_07[{i}]",                              f"re_07_{i}"),
+        ]:
+            if src in bemt_df.columns:
+                cols.append(src)
+                renames[src] = dst
+    if cols:
+        base = _asof(base, bemt_df, cols, renames)
+    return base
+
+
+def _merge_bemt_new_cols(base: pd.DataFrame, bemt_df: pd.DataFrame) -> pd.DataFrame:
+    """Add full kinematic and corrected column names from bemt_rotor_state topic.
+
+    Column naming: insert motor index before the unit suffix, e.g.
+      kinematic_v_inf_m_s[0]  ->  kinematic_v_inf_0_m_s
+      kinematic_j[0]          ->  kinematic_j_0
+      corrected_alpha_disk_rad[0] -> corrected_alpha_disk_0_rad
+    """
+    _fields = [
+        "kinematic_signed_axial_speed_m_s",
+        "kinematic_v_normal_m_s",
+        "kinematic_v_inplane_m_s",
+        "kinematic_v_inf_m_s",
+        "kinematic_alpha_disk_rad",
+        "kinematic_j",
+        "kinematic_j_n",
+        "kinematic_j_p",
+        "induced_axial_velocity_m_s",
+        "corrected_signed_axial_speed_m_s",
+        "corrected_v_normal_m_s",
+        "corrected_v_inplane_m_s",
+        "corrected_v_inf_m_s",
+        "corrected_alpha_disk_rad",
+        "corrected_j",
+        "corrected_j_n",
+        "corrected_j_p",
+    ]
+    cols: list = []
+    renames: dict = {}
+    for i in range(MOTOR_COUNT):
+        for field in _fields:
+            src = f"{field}[{i}]"
+            if field.endswith("_m_s"):
+                dst = f"{field[:-4]}_{i}_m_s"
+            elif field.endswith("_rad"):
+                dst = f"{field[:-4]}_{i}_rad"
+            else:
+                dst = f"{field}_{i}"
+            if src in bemt_df.columns:
+                cols.append(src)
+                renames[src] = dst
+    if cols:
+        base = _asof(base, bemt_df, cols, renames)
+    return base
+
+
+# ---------------------------------------------------------------------------
 # Main pipeline.
 # ---------------------------------------------------------------------------
 
@@ -328,6 +407,7 @@ def build_timeseries(ulog_path: Path) -> Tuple[pd.DataFrame, dict]:
     batt_df = _try("battery_status")
     motors  = _try("actuator_motors")
     esc     = _try("esc_status")
+    bemt_df = _try("bemt_rotor_state")
 
     if lpos is None or att is None:
         raise RuntimeError(
@@ -442,35 +522,50 @@ def build_timeseries(ulog_path: Path) -> Tuple[pd.DataFrame, dict]:
     base["pitch_rad"] = pitch
     base["yaw_rad"] = yaw
 
-    # --- Per-rotor nondimensional state ---
-    air_vel_ned = (
-        base[["velocity_n_m_s", "velocity_e_m_s", "velocity_d_m_s"]].to_numpy(dtype=float)
-        - base[["wind_n_m_s", "wind_e_m_s", "wind_d_m_s"]].to_numpy(dtype=float)
-    )
-    omega_body = base[["roll_rate_rad_s", "pitch_rate_rad_s", "yaw_rate_rad_s"]].to_numpy(dtype=float)
-    rho_arr = base["air_density_kg_m3"].to_numpy(dtype=float)
-    mu_arr = base["dynamic_viscosity_pa_s"].to_numpy(dtype=float)
-
-    for i in range(MOTOR_COUNT):
-        rpm_arr = base[f"motor_rpm_{i}"].to_numpy(dtype=float)
-        state = compute_rotor_inflow_state(
-            i, air_vel_ned, omega_body, q_arr, rpm_arr, rho_arr, mu_arr
+    # --- Per-rotor state: prefer logged bemt_rotor_state; fall back to reconstruction ---
+    has_bemt_topic = bemt_df is not None
+    if has_bemt_topic:
+        # Preferred path: use values computed and timestamped by the C++ BEMT module.
+        # _merge_bemt_legacy populates the backward-compat legacy columns (v_inf_*, j_*, etc.)
+        # using kinematic values.  _merge_bemt_new_cols adds the full kinematic_* and
+        # corrected_* column names.
+        base = _merge_bemt_legacy(base, bemt_df)
+        base = _merge_bemt_new_cols(base, bemt_df)
+        rotor_state_source = "bemt_rotor_state"
+    else:
+        # Fallback path: reconstruct per-rotor kinematic inflow state offline from generic
+        # PX4 topics.  Only kinematic (uncorrected) values are available on this path.
+        air_vel_ned = (
+            base[["velocity_n_m_s", "velocity_e_m_s", "velocity_d_m_s"]].to_numpy(dtype=float)
+            - base[["wind_n_m_s", "wind_e_m_s", "wind_d_m_s"]].to_numpy(dtype=float)
         )
-        base[f"v_inf_{i}_m_s"]    = state["v_inf"]
-        base[f"v_normal_{i}_m_s"] = state["v_normal"]
-        base[f"v_inplane_{i}_m_s"] = state["v_inplane"]
-        base[f"alpha_disk_{i}_rad"] = state["alpha_disk"]
-        base[f"j_{i}"]    = state["j"]
-        base[f"j_n_{i}"]  = state["j_n"]
-        base[f"j_p_{i}"]  = state["j_p"]
-        base[f"re_07_{i}"] = state["re_07"]
+        omega_body = base[["roll_rate_rad_s", "pitch_rate_rad_s", "yaw_rate_rad_s"]].to_numpy(dtype=float)
+        rho_arr = base["air_density_kg_m3"].to_numpy(dtype=float)
+        mu_arr = base["dynamic_viscosity_pa_s"].to_numpy(dtype=float)
+
+        for i in range(MOTOR_COUNT):
+            rpm_arr = base[f"motor_rpm_{i}"].to_numpy(dtype=float)
+            state = compute_rotor_inflow_state(
+                i, air_vel_ned, omega_body, q_arr, rpm_arr, rho_arr, mu_arr
+            )
+            base[f"v_inf_{i}_m_s"]     = state["v_inf"]
+            base[f"v_normal_{i}_m_s"]  = state["v_normal"]
+            base[f"v_inplane_{i}_m_s"] = state["v_inplane"]
+            base[f"alpha_disk_{i}_rad"] = state["alpha_disk"]
+            base[f"j_{i}"]             = state["j"]
+            base[f"j_n_{i}"]           = state["j_n"]
+            base[f"j_p_{i}"]           = state["j_p"]
+            base[f"re_07_{i}"]         = state["re_07"]
+        rotor_state_source = "reconstruction"
 
     # --- Provenance flags ---
     base["has_wind"] = has_wind
     base["has_air_data"] = has_air_data
     base["has_battery_status"] = has_battery
     base["has_esc_status"] = has_esc
+    base["has_bemt_topic"] = has_bemt_topic
     base["rpm_source"] = rpm_source
+    base["rotor_state_source"] = rotor_state_source
 
     # --- Timestamps ---
     base["timestamp_us"] = base["timestamp"]
@@ -487,7 +582,9 @@ def build_timeseries(ulog_path: Path) -> Tuple[pd.DataFrame, dict]:
         "has_air_data": has_air_data,
         "has_battery": has_battery,
         "has_esc": has_esc,
+        "has_bemt_topic": has_bemt_topic,
         "rpm_source": rpm_source,
+        "rotor_state_source": rotor_state_source,
     })
 
     return base, meta
@@ -519,8 +616,30 @@ _FIXED_COLS = [
     for col in (f"v_inf_{i}_m_s", f"v_normal_{i}_m_s", f"v_inplane_{i}_m_s",
                 f"alpha_disk_{i}_rad", f"j_{i}", f"j_n_{i}", f"j_p_{i}", f"re_07_{i}")
 ] + [
-    "has_wind", "has_air_data", "has_battery_status", "has_esc_status",
-    "rpm_source", "sample_valid",
+    col
+    for i in range(MOTOR_COUNT)
+    for col in (
+        f"kinematic_signed_axial_speed_{i}_m_s",
+        f"kinematic_v_normal_{i}_m_s",
+        f"kinematic_v_inplane_{i}_m_s",
+        f"kinematic_v_inf_{i}_m_s",
+        f"kinematic_alpha_disk_{i}_rad",
+        f"kinematic_j_{i}",
+        f"kinematic_j_n_{i}",
+        f"kinematic_j_p_{i}",
+        f"induced_axial_velocity_{i}_m_s",
+        f"corrected_signed_axial_speed_{i}_m_s",
+        f"corrected_v_normal_{i}_m_s",
+        f"corrected_v_inplane_{i}_m_s",
+        f"corrected_v_inf_{i}_m_s",
+        f"corrected_alpha_disk_{i}_rad",
+        f"corrected_j_{i}",
+        f"corrected_j_n_{i}",
+        f"corrected_j_p_{i}",
+    )
+] + [
+    "has_wind", "has_air_data", "has_battery_status", "has_esc_status", "has_bemt_topic",
+    "rpm_source", "rotor_state_source", "sample_valid",
 ]
 
 
@@ -566,6 +685,7 @@ def write_report(df: pd.DataFrame, meta: dict, output_path: Path) -> None:
         *[_topic_row(t) for t in [
             "vehicle_local_position", "vehicle_attitude", "vehicle_angular_velocity",
             "vehicle_air_data", "wind", "battery_status", "actuator_motors", "esc_status",
+            "bemt_rotor_state",
         ]],
         "",
         "## Dataset summary",
@@ -589,6 +709,18 @@ def write_report(df: pd.DataFrame, meta: dict, output_path: Path) -> None:
         "## Variable conventions",
         "- `v_normal_*_m_s` and `j_n_*` are signed axial quantities.",
         "- `alpha_disk_*_rad = atan2(v_inplane, abs(v_normal))`, so the denominator uses axial magnitude.",
+        "- `kinematic_v_normal_*_m_s` is |signed_axial| (non-negative); `kinematic_signed_axial_speed_*_m_s` is signed.",
+        "- Corrected columns include the single-shot momentum-theory induced-velocity correction.",
+        "",
+        "## Rotor-state source",
+        f"- Source: `{meta.get('rotor_state_source', 'unknown')}`",
+        *([
+            "- **Preferred path**: values read directly from the `bemt_rotor_state` uORB topic "
+            "as logged by the C++ BEMT module. Both kinematic and corrected columns are present.",
+        ] if meta.get("has_bemt_topic") else [
+            "- **Fallback path**: rotor-state reconstructed offline from generic PX4 topics. "
+            "Only kinematic columns are available. `corrected_*` columns are absent.",
+        ]),
         "",
         "## RPM availability",
         f"- Source: `{meta['rpm_source']}`",
@@ -636,6 +768,13 @@ def write_report(df: pd.DataFrame, meta: dict, output_path: Path) -> None:
            if meta["has_esc"]
            else "**topic absent — J, J_n, J_p, Re_07 are NaN.** "
                 "RPM was not estimated or fabricated from command signals."),
+        "- **Rotor-state source:** "
+        + ("values read from the `bemt_rotor_state` uORB topic as logged by the C++ BEMT "
+           "module. Kinematic and corrected columns are both present."
+           if meta.get("has_bemt_topic")
+           else "**`bemt_rotor_state` topic absent** — rotor state reconstructed offline "
+                "from generic PX4 topics. Only kinematic values available; `corrected_*` "
+                "columns are absent from this CSV."),
         "- **Axial convention:** `v_normal` and `J_n` remain signed; `alpha_disk` uses `abs(v_normal)`.",
         "",
         "## Limitations",
@@ -644,7 +783,7 @@ def write_report(df: pd.DataFrame, meta: dict, output_path: Path) -> None:
         "- This report does not establish hardware equivalence with any real platform.",
         "- ESC-reported RPM reflects simulated motor dynamics, not validated real-hardware RPM.",
         "- Single-shot induced-velocity correction in `bemt_model.cpp` is an engineering "
-        "approximation (see code comments); it is not used in this offline tool.",
+        "approximation; corrected values in the `corrected_*` columns reflect this approximation.",
         "",
         "---",
         "_Generated by `tools/ulog_to_csv.py`_",

@@ -30,13 +30,16 @@
 
 - [ ] Add an iterated induced-velocity solver as an option (controlled by a compile-time flag
   or parameter), retaining the single-shot version as the default.
-- [ ] Publish BEMT outputs to a custom uORB topic for logging and downstream use.
+- [x] Publish BEMT outputs to a custom uORB topic (`bemt_rotor_state`) for logging and downstream use.
 - [ ] Add a parameter (`BEMT_ENABLE`) to gate the module at runtime.
 - [ ] Write integration tests that run the PX4 SITL for a fixed duration and verify
   BEMT output ranges against expected values.
 
 ## Offline tool
 
+- [x] `tools/ulog_to_csv.py` now prefers the `bemt_rotor_state` topic when present
+  and falls back to offline reconstruction when absent. `rotor_state_source` provenance
+  column indicates which path was used.
 - [ ] Add a `--plot` flag to `tools/ulog_to_csv.py` to generate J vs. time and
   Re_07 vs. time figures using matplotlib.
 - [ ] Support multi-instance ESC status logs (multiple `esc_status` instances).
